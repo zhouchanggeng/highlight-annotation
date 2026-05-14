@@ -2,7 +2,7 @@
   "id": "highlight-annotation",
   "name": "Highlight Annotation",
   "version": "0.2.0",
-  "minAppVersion": "1.5.0",
+  "minAppVersion": "1.11.4",
   "description": "Manage Obsidian markdown highlights with external JSON annotations, multi-comments, search, hover previews, and AI-assisted notes.",
   "author": "zhouchanggeng",
   "isDesktopOnly": false

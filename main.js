@@ -1,4 +1,4 @@
-const { ItemView, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, requestUrl } = require("obsidian");
+const { ItemView, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, SecretComponent, Setting, requestUrl } = require("obsidian");
 const { Decoration, ViewPlugin } = require("@codemirror/view");
 
 const MARK_CLASS = "hl-annotation";
@@ -21,12 +21,13 @@ const DEFAULT_GENERAL_SETTINGS = {
 const DEFAULT_AI_SETTINGS = {
   enabled: false,
   apiUrl: "https://api.openai.com/v1/chat/completions",
-  apiKey: "",
+  apiKeySecretId: "",
   model: "gpt-4.1-mini",
   temperature: 0.2,
   prompt:
     "\u8bf7\u4e3a\u4e0b\u9762\u8fd9\u6bb5\u9ad8\u4eae\u6587\u5b57\u5199\u4e00\u6761\u7b80\u6d01\u3001\u6709\u6d1e\u5bdf\u529b\u7684\u4e2d\u6587\u6279\u6ce8\u3002\u8981\u6c42\uff1a\u89e3\u91ca\u5173\u952e\u542b\u4e49\uff0c\u6307\u51fa\u503c\u5f97\u8bb0\u4f4f\u7684\u70b9\uff1b\u4e0d\u8981\u590d\u8ff0\u539f\u6587\uff1b\u63a7\u5236\u5728 1-3 \u53e5\u8bdd\u3002\n\n\u9ad8\u4eae\u6587\u5b57\uff1a{{text}}"
 };
+const DEFAULT_AI_API_KEY_SECRET_ID = "highlight-annotation-ai-api-key";
 const DESIRED_RETENTION = 0.9;
 const MAX_INTERVAL_DAYS = 36500;
 const FSRS_DECAY = -0.5;
@@ -946,17 +947,25 @@ class HighlightAnnotationSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("API Key")
-      .setDesc("\u4ec5\u4fdd\u5b58\u5728\u672c\u5730\u63d2\u4ef6 data.json \u4e2d\u3002")
-      .addText((text) => {
-        text
-          .setPlaceholder("sk-...")
-          .setValue(aiSettings.apiKey)
+      .setDesc("\u4fdd\u5b58\u5728 Obsidian \u5bc6\u94a5\u5b58\u50a8\u4e2d\uff0c\u4e0d\u5199\u5165\u63d2\u4ef6 data.json\u3002")
+      .addExtraButton((button) => {
+        button
+          .setIcon("refresh-cw")
+          .setTooltip("\u68c0\u67e5 API Key")
+          .onClick(async () => {
+            const apiKey = await this.plugin.getAiApiKey();
+            new Notice(apiKey ? "API Key \u5df2\u914d\u7f6e" : "\u8bf7\u9009\u62e9\u6216\u65b0\u5efa API Key");
+          });
+      })
+      .addComponent((containerEl) => {
+        const secretComponent = new SecretComponent(this.plugin.app, containerEl);
+        secretComponent
+          .setValue(aiSettings.apiKeySecretId ?? "")
           .onChange(async (value) => {
-            aiSettings.apiKey = value.trim();
+            aiSettings.apiKeySecretId = value;
             await this.plugin.saveSettings();
           });
-        text.inputEl.type = "password";
-        text.inputEl.addClass("hl-annotation-setting-wide-input");
+        return secretComponent;
       });
 
     new Setting(containerEl)
@@ -1806,7 +1815,11 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
     this.currentFile = this.app.workspace.getActiveFile() ?? null;
     this.settings = await this.loadSettings();
     this.flashcardState = this.getFlashcardStateFromData(this.settings.rawData);
+    const shouldSaveMigratedSettings = this.settings.rawData?.ai?.apiKey;
     delete this.settings.rawData;
+    if (shouldSaveMigratedSettings) {
+      await this.saveSettings();
+    }
 
     this.addSettingTab(new HighlightAnnotationSettingTab(this.app, this));
 
@@ -2375,11 +2388,21 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
 
   async loadSettings() {
     const data = await this.loadData();
+    const ai = {
+      ...DEFAULT_AI_SETTINGS,
+      ...(data?.ai ?? {})
+    };
+
+    if (!ai.apiKeySecretId && data?.ai?.apiKey) {
+      ai.apiKeySecretId = DEFAULT_AI_API_KEY_SECRET_ID;
+      await this.app.secretStorage.setSecret(ai.apiKeySecretId, data.ai.apiKey);
+      new Notice("Highlight Annotation: AI API Key \u5df2\u8fc1\u79fb\u5230 Obsidian \u5bc6\u94a5\u5b58\u50a8");
+    }
+
+    delete ai.apiKey;
+
     return {
-      ai: {
-        ...DEFAULT_AI_SETTINGS,
-        ...(data?.ai ?? {})
-      },
+      ai,
       openSourceOnDeleteHighlight:
         data?.openSourceOnDeleteHighlight ?? DEFAULT_GENERAL_SETTINGS.openSourceOnDeleteHighlight,
       ignorePatterns: normalizeIgnorePatterns(data?.ignorePatterns ?? DEFAULT_IGNORE_PATTERNS),
@@ -2678,10 +2701,11 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
   }
 
   async saveSettings() {
+    const { apiKey, ...aiSettings } = this.settings.ai ?? {};
     await this.saveData({
       cards: this.flashcardState?.cards ?? {},
       lastSyncedAt: this.flashcardState?.lastSyncedAt ?? null,
-      ai: this.settings.ai,
+      ai: aiSettings,
       openSourceOnDeleteHighlight: this.settings.openSourceOnDeleteHighlight,
       ignorePatterns: normalizeIgnorePatterns(this.settings.ignorePatterns)
     });
@@ -2700,7 +2724,16 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
 
   isAiAnnotationConfigured() {
     const ai = this.settings?.ai ?? {};
-    return Boolean(ai.enabled && ai.apiUrl && ai.apiKey && ai.model);
+    return Boolean(ai.enabled && ai.apiUrl && ai.apiKeySecretId && ai.model);
+  }
+
+  async getAiApiKey() {
+    const secretId = this.settings?.ai?.apiKeySecretId;
+    if (!secretId) {
+      return "";
+    }
+
+    return (await this.app.secretStorage.getSecret(secretId)) ?? "";
   }
 
   buildAiPrompt(selectedText, currentNote = "") {
@@ -2716,12 +2749,17 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
     }
 
     const ai = this.settings.ai;
+    const apiKey = await this.getAiApiKey();
+    if (!apiKey) {
+      throw new Error("\u8bf7\u5148\u5728\u63d2\u4ef6\u8bbe\u7f6e\u4e2d\u9009\u62e9\u6216\u65b0\u5efa AI API Key");
+    }
+
     const response = await requestUrl({
       url: ai.apiUrl,
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${ai.apiKey}`
+        Authorization: `Bearer ${apiKey}`
       },
       body: JSON.stringify({
         model: ai.model,

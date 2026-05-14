@@ -15,6 +15,9 @@ const DEFAULT_IGNORE_PATTERNS = [
   ".excalidraw",
   "Spaces/Archives/"
 ];
+const DEFAULT_GENERAL_SETTINGS = {
+  openSourceOnDeleteHighlight: true
+};
 const DEFAULT_AI_SETTINGS = {
   enabled: false,
   apiUrl: "https://api.openai.com/v1/chat/completions",
@@ -117,6 +120,12 @@ function renderHighlightedText(containerEl, text, query) {
 
 function getLineNumber(content, offset) {
   return content.slice(0, offset).split("\n").length;
+}
+
+function getHighlightSignature(content) {
+  return parseAnnotations(content)
+    .map((annotation) => `${annotation.start}:${annotation.end}:${normalizeText(annotation.text)}`)
+    .join("|");
 }
 
 function clamp(value, min, max) {
@@ -1013,6 +1022,18 @@ class HighlightAnnotationSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
+      .setName("\u5220\u9664\u9ad8\u4eae\u65f6\u6253\u5f00\u6e90\u6587\u4ef6")
+      .setDesc("\u5f00\u542f\u65f6\uff0c\u70b9\u51fb\u201c\u5220\u9664\u9ad8\u4eae\u201d\u4f1a\u5148\u6253\u5f00\u5bf9\u5e94\u7b14\u8bb0\u4ee5\u4fbf\u786e\u8ba4\u4e0a\u4e0b\u6587\uff1b\u5173\u95ed\u540e\u4f1a\u5728\u540e\u53f0\u76f4\u63a5\u4fee\u6539\u5bf9\u5e94\u6587\u4ef6\u3002")
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.openSourceOnDeleteHighlight)
+          .onChange(async (value) => {
+            this.plugin.settings.openSourceOnDeleteHighlight = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
       .setName("\u5ffd\u7565\u6587\u4ef6\u6216\u6587\u4ef6\u5939")
       .setDesc("\u5168\u5e93\u626b\u63cf\u548c\u95ea\u5361\u540c\u6b65\u65f6\u8df3\u8fc7\u8fd9\u4e9b\u8def\u5f84\uff1b\u6bcf\u884c\u4e00\u6761\uff0c\u53ef\u5199 .excalidraw\u3001Folder/ \u6216 Folder/file.md\u3002")
       .addTextArea((text) => {
@@ -1070,12 +1091,16 @@ class AnnotationListView extends ItemView {
   }
 
   filterAnnotations(annotations) {
+    const scopedAnnotations = this.filterScope === "note"
+      ? annotations.filter((annotation) => annotation.note)
+      : annotations;
+
     if (!this.searchQuery) {
-      return annotations;
+      return scopedAnnotations;
     }
 
     const query = this.searchQuery.toLowerCase();
-    return annotations.filter((annotation) => {
+    return scopedAnnotations.filter((annotation) => {
       const text = annotation.text.toLowerCase();
       const note = annotation.note.toLowerCase();
 
@@ -1104,6 +1129,16 @@ class AnnotationListView extends ItemView {
     this.selectedAnnotationKey = this.getAnnotationKey(file, annotation);
     this.focusAfterRender = focusAfterRender;
     this.scrollTopAfterRender = this.contentEl.scrollTop;
+  }
+
+  async selectAndRevealAnnotation(file, annotation) {
+    this.viewMode = file?.path === this.plugin.getCurrentFile()?.path ? "current" : "all";
+    this.searchQuery = "";
+    this.filterScope = "all";
+    this.selectedAnnotationKey = this.getAnnotationKey(file, annotation);
+    this.focusAfterRender = null;
+    this.scrollTopAfterRender = null;
+    await this.render();
   }
 
   restoreListPosition(listEl) {
@@ -1204,11 +1239,6 @@ class AnnotationListView extends ItemView {
       const noteContentEl = noteEl.createDiv({ cls: "hl-annotation-item-note hi-note-content" });
       noteContentEl.setText("\u672a\u6dfb\u52a0\u6279\u6ce8");
       noteContentEl.addClass("is-empty");
-      noteContentEl.addEventListener("click", async (event) => {
-        event.stopPropagation();
-        selectCurrent("edit");
-        await this.plugin.addAnnotationCommentInFile(file, annotation);
-      });
     } else {
       comments.forEach((comment, index) => {
         const noteEl = notesListEl.createDiv({ cls: "hl-annotation-note hi-note" });
@@ -1235,7 +1265,6 @@ class AnnotationListView extends ItemView {
         };
 
         editCommentButton.addEventListener("click", editComment);
-        noteContentEl.addEventListener("click", editComment);
         deleteCommentButton.addEventListener("click", async (event) => {
           event.stopPropagation();
           selectCurrent("delete");
@@ -1455,12 +1484,16 @@ class AnnotationListView extends ItemView {
   }
 
   filterAnnotationEntries(entries) {
+    const scopedEntries = this.filterScope === "note"
+      ? entries.filter(({ annotation }) => annotation.note)
+      : entries;
+
     if (!this.searchQuery) {
-      return entries;
+      return scopedEntries;
     }
 
     const query = this.searchQuery.toLowerCase();
-    return entries.filter(({ file, annotation }) => {
+    return scopedEntries.filter(({ file, annotation }) => {
       const text = annotation.text.toLowerCase();
       const note = annotation.note.toLowerCase();
 
@@ -1788,6 +1821,7 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
 
     this.registerEditorExtension(hiddenAnnotationCommentExtension);
     this.registerDomEvent(document, "mouseover", hideAnnotationCommentsInDocument);
+    this.registerDomEvent(document, "click", (event) => this.handleHighlightClick(event));
     this.registerDomEvent(document, "pointerover", (event) => this.handleHighlightHoverStart(event));
     this.registerDomEvent(document, "pointerout", (event) => this.handleHighlightHoverEnd(event));
     this.registerDomEvent(document, "scroll", () => this.hideAnnotationHoverTooltip(), true);
@@ -1987,15 +2021,15 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
     );
 
     this.registerEvent(
-      this.app.workspace.on("editor-change", () => {
-        this.refreshAnnotationViews();
+      this.app.workspace.on("editor-change", (editor, info) => {
+        this.handleEditorChange(editor, info);
       })
     );
 
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
         if (!this.currentFile || file.path === this.currentFile.path) {
-          this.refreshAnnotationViews();
+          this.handleCurrentFileContentPotentiallyChanged();
         }
       })
     );
@@ -2009,6 +2043,10 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
   }
 
   onunload() {
+    if (this.annotationViewRefreshTimer) {
+      window.clearTimeout(this.annotationViewRefreshTimer);
+      this.annotationViewRefreshTimer = null;
+    }
     this.hideAnnotationHoverTooltip();
     this.app.workspace.detachLeavesOfType(VIEW_TYPE_ANNOTATION_LIST);
     this.app.workspace.detachLeavesOfType(LEGACY_VIEW_TYPE_FLASHCARD_REVIEW);
@@ -2051,7 +2089,21 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
   }
 
   updateCurrentFile(file) {
+    const previousPath = this.currentFile?.path ?? null;
+    const nextPath = file?.path ?? null;
+    const fileChanged = previousPath !== nextPath;
+
     this.currentFile = file;
+    if (file) {
+      this.rememberCurrentHighlightSignature();
+    } else {
+      this.currentHighlightSignature = "";
+    }
+
+    if (!fileChanged) {
+      return;
+    }
+
     if (Date.now() < this.suppressCurrentFileRefreshUntil) {
       return;
     }
@@ -2061,6 +2113,54 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
 
   getCurrentFile() {
     return this.app.workspace.getActiveFile() ?? this.currentFile ?? null;
+  }
+
+  rememberCurrentHighlightSignature() {
+    const view = this.getActiveMarkdownView();
+    if (view?.file?.path === this.currentFile?.path && view.editor) {
+      this.currentHighlightSignature = getHighlightSignature(view.editor.getValue());
+    }
+  }
+
+  handleEditorChange(editor, info) {
+    const file = info?.file ?? this.getCurrentFile();
+    if (!file || this.currentFile?.path !== file.path) {
+      return;
+    }
+
+    const nextSignature = getHighlightSignature(editor.getValue());
+    if (this.currentHighlightSignature === undefined) {
+      this.currentHighlightSignature = nextSignature;
+      return;
+    }
+
+    if (nextSignature === this.currentHighlightSignature) {
+      return;
+    }
+
+    this.currentHighlightSignature = nextSignature;
+    this.scheduleAnnotationViewRefresh();
+  }
+
+  async handleCurrentFileContentPotentiallyChanged() {
+    const file = this.getCurrentFile();
+    if (!file) {
+      return;
+    }
+
+    const content = await this.getFileContent(file);
+    const nextSignature = getHighlightSignature(content);
+    if (this.currentHighlightSignature === undefined) {
+      this.currentHighlightSignature = nextSignature;
+      return;
+    }
+
+    if (nextSignature === this.currentHighlightSignature) {
+      return;
+    }
+
+    this.currentHighlightSignature = nextSignature;
+    this.scheduleAnnotationViewRefresh(800);
   }
 
   shouldIgnoreFile(file) {
@@ -2116,7 +2216,26 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
     this.hideAnnotationHoverTooltip();
   }
 
-  async getAnnotationForHoverElement(highlightEl) {
+  async handleHighlightClick(event) {
+    const highlightEl = findHighlightHoverElement(event.target);
+    if (!highlightEl) {
+      return;
+    }
+
+    const annotation = await this.getAnnotationForElement(highlightEl);
+    if (!annotation) {
+      return;
+    }
+
+    const file = this.getHoverFileForElement(highlightEl);
+    if (!file) {
+      return;
+    }
+
+    await this.selectAnnotationInViews(file, annotation);
+  }
+
+  async getAnnotationForElement(highlightEl) {
     const file = this.getHoverFileForElement(highlightEl);
     if (!file) {
       return null;
@@ -2131,9 +2250,25 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
     const annotations = await this.getMergedAnnotations(file, content);
     return (
       annotations.find(
-        (annotation) => annotation.note && normalizeHighlightText(annotation.text) === text
+        (annotation) => normalizeHighlightText(annotation.text) === text
       ) ?? null
     );
+  }
+
+  async getAnnotationForHoverElement(highlightEl) {
+    const annotation = await this.getAnnotationForElement(highlightEl);
+    return annotation?.note ? annotation : null;
+  }
+
+  async selectAnnotationInViews(file, annotation) {
+    let leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_ANNOTATION_LIST)[0];
+    if (!leaf) {
+      leaf = await this.activateAnnotationListView();
+    }
+
+    if (leaf?.view && typeof leaf.view.selectAndRevealAnnotation === "function") {
+      await leaf.view.selectAndRevealAnnotation(file, annotation);
+    }
   }
 
   async showAnnotationHoverTooltip(highlightEl) {
@@ -2208,6 +2343,17 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
     });
   }
 
+  scheduleAnnotationViewRefresh(delay = 600) {
+    if (this.annotationViewRefreshTimer) {
+      window.clearTimeout(this.annotationViewRefreshTimer);
+    }
+
+    this.annotationViewRefreshTimer = window.setTimeout(() => {
+      this.annotationViewRefreshTimer = null;
+      this.refreshAnnotationViews();
+    }, delay);
+  }
+
   async activateAnnotationListView() {
     let leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_ANNOTATION_LIST)[0];
 
@@ -2234,6 +2380,8 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
         ...DEFAULT_AI_SETTINGS,
         ...(data?.ai ?? {})
       },
+      openSourceOnDeleteHighlight:
+        data?.openSourceOnDeleteHighlight ?? DEFAULT_GENERAL_SETTINGS.openSourceOnDeleteHighlight,
       ignorePatterns: normalizeIgnorePatterns(data?.ignorePatterns ?? DEFAULT_IGNORE_PATTERNS),
       rawData: data ?? {}
     };
@@ -2534,6 +2682,7 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
       cards: this.flashcardState?.cards ?? {},
       lastSyncedAt: this.flashcardState?.lastSyncedAt ?? null,
       ai: this.settings.ai,
+      openSourceOnDeleteHighlight: this.settings.openSourceOnDeleteHighlight,
       ignorePatterns: normalizeIgnorePatterns(this.settings.ignorePatterns)
     });
   }
@@ -3274,6 +3423,11 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
   }
 
   async deleteHighlightInFile(file, target) {
+    if (!this.settings.openSourceOnDeleteHighlight) {
+      await this.deleteHighlightInFileSilently(file, target);
+      return;
+    }
+
     const leaf = await this.getMarkdownLeaf();
     await leaf.openFile(file, { active: true });
     this.app.workspace.setActiveLeaf(leaf, true, true);
@@ -3311,6 +3465,37 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
         view.editor.focus();
         await this.deleteExternalAnnotation(file, current);
         this.clearExternalCache(file.path);
+        this.refreshAnnotationViews();
+        new Notice("\u9ad8\u4eae\u548c\u6279\u6ce8\u5df2\u5220\u9664");
+      }
+    ).open();
+  }
+
+  async deleteHighlightInFileSilently(file, target) {
+    const content = await this.app.vault.read(file);
+    const latest = await this.findMatchingMergedAnnotation(file, content, target);
+    if (!latest) {
+      new Notice("\u6ca1\u627e\u5230\u53ef\u5220\u9664\u7684\u9ad8\u4eae");
+      return;
+    }
+
+    new ConfirmModal(
+      this.app,
+      "\u5220\u9664\u9ad8\u4eae",
+      `\u5c06\u5728\u540e\u53f0\u4fee\u6539 ${file.path}\uff0c\u628a ==\u9ad8\u4eae== \u8fd8\u539f\u4e3a\u666e\u901a\u6587\u672c\uff0c\u5e76\u5220\u9664\u8fd9\u6761\u9ad8\u4eae\u7684\u5168\u90e8\u6279\u6ce8\u3002`,
+      async () => {
+        const latestContent = await this.app.vault.read(file);
+        const current = await this.findMatchingMergedAnnotation(file, latestContent, latest);
+        if (!current) {
+          new Notice("\u6ca1\u627e\u5230\u53ef\u5220\u9664\u7684\u9ad8\u4eae");
+          return;
+        }
+
+        const nextContent = `${latestContent.slice(0, current.start)}${current.text}${latestContent.slice(current.end)}`;
+        await this.app.vault.modify(file, nextContent);
+        await this.deleteExternalAnnotation(file, current);
+        this.clearExternalCache(file.path);
+        this.currentHighlightSignature = getHighlightSignature(nextContent);
         this.refreshAnnotationViews();
         new Notice("\u9ad8\u4eae\u548c\u6279\u6ce8\u5df2\u5220\u9664");
       }

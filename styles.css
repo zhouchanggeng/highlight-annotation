@@ -355,7 +355,7 @@
 
 .hl-annotation-note .hi-note-content {
   padding: 2px;
-  cursor: text;
+  cursor: default;
   transition: background-color 0.2s ease;
 }
 

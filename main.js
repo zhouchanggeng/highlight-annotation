@@ -1,4 +1,4 @@
-const { ItemView, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, SecretComponent, Setting, requestUrl } = require("obsidian");
+const { ItemView, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, SecretComponent, Setting, TFile, normalizePath, requestUrl } = require("obsidian");
 const { Decoration, ViewPlugin } = require("@codemirror/view");
 
 const MARK_CLASS = "hl-annotation";
@@ -16,7 +16,9 @@ const DEFAULT_IGNORE_PATTERNS = [
   "Spaces/Archives/"
 ];
 const DEFAULT_GENERAL_SETTINGS = {
-  openSourceOnDeleteHighlight: true
+  openSourceOnDeleteHighlight: true,
+  saveWordTranslations: true,
+  wordBookPath: "Sources/\u5355\u8bcd/\u82f1\u6587\u5355\u8bcd\u672c.md"
 };
 const DEFAULT_AI_SETTINGS = {
   enabled: false,
@@ -131,6 +133,26 @@ function getHighlightSignature(content) {
 
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
+}
+
+function normalizeWordText(value) {
+  return String(value ?? "")
+    .trim()
+    .replace(/[“”"'`.,!?;:()[\]{}<>，。！？；：（）【】《》]/g, "")
+    .replace(/\s+/g, " ");
+}
+
+function isLikelyEnglishWord(value) {
+  const word = normalizeWordText(value);
+  return Boolean(word && /^[A-Za-z][A-Za-z\s-]*$/.test(word) && word.length <= 80);
+}
+
+function stripMarkdownFence(value) {
+  return String(value ?? "")
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
 }
 
 function addDays(date, days) {
@@ -1040,6 +1062,32 @@ class HighlightAnnotationSettingTab extends PluginSettingTab {
             this.plugin.settings.openSourceOnDeleteHighlight = value;
             await this.plugin.saveSettings();
           });
+      });
+
+    new Setting(containerEl)
+      .setName("\u4fdd\u5b58 AI \u5355\u8bcd\u7ffb\u8bd1")
+      .setDesc("\u5f00\u542f\u540e\uff0c\u53f3\u952e\u82f1\u6587\u5355\u8bcd\u751f\u6210\u7ffb\u8bd1\u65f6\u4f1a\u8ffd\u52a0\u5230\u6307\u5b9a\u5355\u8bcd\u672c\u3002")
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.saveWordTranslations)
+          .onChange(async (value) => {
+            this.plugin.settings.saveWordTranslations = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("\u5355\u8bcd\u672c\u4fdd\u5b58\u8def\u5f84")
+      .setDesc("\u751f\u6210\u7684\u5355\u8bcd\u6761\u76ee\u4f1a\u8ffd\u52a0\u5230\u8fd9\u4e2a Markdown \u6587\u4ef6\u3002")
+      .addText((text) => {
+        text
+          .setPlaceholder(DEFAULT_GENERAL_SETTINGS.wordBookPath)
+          .setValue(this.plugin.settings.wordBookPath)
+          .onChange(async (value) => {
+            this.plugin.settings.wordBookPath = value.trim() || DEFAULT_GENERAL_SETTINGS.wordBookPath;
+            await this.plugin.saveSettings();
+          });
+        text.inputEl.addClass("hl-annotation-setting-wide-input");
       });
 
     new Setting(containerEl)
@@ -1991,6 +2039,15 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
               .setIcon("highlighter")
               .onClick(() => this.annotateSelection(editor));
           });
+
+          if (isLikelyEnglishWord(editor.getSelection())) {
+            menu.addItem((item) => {
+              item
+                .setTitle("\u7528 AI \u7ffb\u8bd1\u82f1\u6587\u5355\u8bcd")
+                .setIcon("languages")
+                .onClick(() => this.translateSelectedWord(editor));
+            });
+          }
         }
 
         if (editor.getSelection() || this.findAnnotationAtOffset(editor.getValue(), editor.posToOffset(editor.getCursor()))) {
@@ -2405,6 +2462,8 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
       ai,
       openSourceOnDeleteHighlight:
         data?.openSourceOnDeleteHighlight ?? DEFAULT_GENERAL_SETTINGS.openSourceOnDeleteHighlight,
+      saveWordTranslations: data?.saveWordTranslations ?? DEFAULT_GENERAL_SETTINGS.saveWordTranslations,
+      wordBookPath: data?.wordBookPath ?? DEFAULT_GENERAL_SETTINGS.wordBookPath,
       ignorePatterns: normalizeIgnorePatterns(data?.ignorePatterns ?? DEFAULT_IGNORE_PATTERNS),
       rawData: data ?? {}
     };
@@ -2707,6 +2766,8 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
       lastSyncedAt: this.flashcardState?.lastSyncedAt ?? null,
       ai: aiSettings,
       openSourceOnDeleteHighlight: this.settings.openSourceOnDeleteHighlight,
+      saveWordTranslations: this.settings.saveWordTranslations,
+      wordBookPath: this.settings.wordBookPath,
       ignorePatterns: normalizeIgnorePatterns(this.settings.ignorePatterns)
     });
   }
@@ -2789,6 +2850,140 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
     }
 
     return content;
+  }
+
+  async requestAiChat(messages, temperature = this.settings.ai.temperature) {
+    if (!this.isAiAnnotationConfigured()) {
+      throw new Error("\u8bf7\u5148\u5728\u63d2\u4ef6\u8bbe\u7f6e\u4e2d\u914d\u7f6e AI");
+    }
+
+    const ai = this.settings.ai;
+    const apiKey = await this.getAiApiKey();
+    if (!apiKey) {
+      throw new Error("\u8bf7\u5148\u5728\u63d2\u4ef6\u8bbe\u7f6e\u4e2d\u9009\u62e9\u6216\u65b0\u5efa AI API Key");
+    }
+
+    const response = await requestUrl({
+      url: ai.apiUrl,
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model: ai.model,
+        temperature,
+        messages
+      }),
+      throw: false
+    });
+
+    if (response.status < 200 || response.status >= 300) {
+      const message = response.json?.error?.message || response.text || `HTTP ${response.status}`;
+      throw new Error(`AI \u8bf7\u6c42\u5931\u8d25\uff1a${message}`);
+    }
+
+    const content = response.json?.choices?.[0]?.message?.content?.trim();
+    if (!content) {
+      throw new Error("AI \u6ca1\u6709\u8fd4\u56de\u5185\u5bb9");
+    }
+
+    return content;
+  }
+
+  async generateWordTranslation(word) {
+    const prompt = [
+      "\u8bf7\u628a\u82f1\u6587\u5355\u8bcd\u6216\u77ed\u8bed\u89e3\u91ca\u4e3a\u4e2d\u6587\uff0c\u5e76\u7ed9\u51fa\u4e00\u4e2a\u81ea\u7136\u7684\u82f1\u6587\u4f8b\u53e5\u548c\u4e2d\u6587\u7ffb\u8bd1\u3002",
+      "\u53ea\u8fd4\u56de JSON\uff0c\u4e0d\u8981 Markdown \u4ee3\u7801\u5757\uff0c\u683c\u5f0f\uff1a",
+      "{\"word\":\"...\",\"meaning\":\"...\",\"example\":\"...\",\"exampleTranslation\":\"...\"}",
+      `\u5355\u8bcd\uff1a${word}`
+    ].join("\n");
+
+    const content = await this.requestAiChat(
+      [
+        {
+          role: "system",
+          content: "\u4f60\u662f\u4e00\u4e2a\u7b80\u6d01\u51c6\u786e\u7684\u82f1\u8bed\u5355\u8bcd\u52a9\u624b\u3002"
+        },
+        {
+          role: "user",
+          content: prompt
+        }
+      ],
+      0.2
+    );
+
+    try {
+      const parsed = JSON.parse(stripMarkdownFence(content));
+      return {
+        word: normalizeWordText(parsed.word) || word,
+        meaning: String(parsed.meaning ?? "").trim(),
+        example: String(parsed.example ?? "").trim(),
+        exampleTranslation: String(parsed.exampleTranslation ?? "").trim()
+      };
+    } catch (_error) {
+      return {
+        word,
+        meaning: content,
+        example: "",
+        exampleTranslation: ""
+      };
+    }
+  }
+
+  formatWordBookEntry(entry) {
+    const lines = [
+      `==${entry.word}==`,
+      "",
+      `- \u91ca\u4e49\uff1a${entry.meaning || "\u672a\u8fd4\u56de"}`,
+    ];
+
+    if (entry.example) {
+      lines.push(`- \u4f8b\u53e5\uff1a${entry.example}`);
+    }
+
+    if (entry.exampleTranslation) {
+      lines.push(`- \u4f8b\u53e5\u7ffb\u8bd1\uff1a${entry.exampleTranslation}`);
+    }
+
+    return `${lines.join("\n")}\n`;
+  }
+
+  async ensureVaultFile(path, initialContent = "") {
+    const normalizedPath = normalizePath(path);
+    const existing = this.app.vault.getAbstractFileByPath(normalizedPath);
+    if (existing) {
+      if (!(existing instanceof TFile)) {
+        throw new Error(`\u8bcd\u672c\u8def\u5f84\u4e0d\u662f Markdown \u6587\u4ef6\uff1a${normalizedPath}`);
+      }
+      return existing;
+    }
+
+    const parts = normalizedPath.split("/");
+    parts.pop();
+    let currentPath = "";
+    for (const part of parts) {
+      currentPath = currentPath ? `${currentPath}/${part}` : part;
+      if (!this.app.vault.getAbstractFileByPath(currentPath)) {
+        await this.app.vault.createFolder(currentPath);
+      }
+    }
+
+    return this.app.vault.create(normalizedPath, initialContent);
+  }
+
+  async appendWordTranslation(entry) {
+    const path = this.settings.wordBookPath || DEFAULT_GENERAL_SETTINGS.wordBookPath;
+    const file = await this.ensureVaultFile(path, "#word\n\n");
+    const content = await this.app.vault.read(file);
+    const duplicatePattern = new RegExp(`(^|\\n)==\\s*${entry.word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*==`, "i");
+    if (duplicatePattern.test(content)) {
+      return false;
+    }
+
+    const separator = content.endsWith("\n\n") || content.length === 0 ? "" : content.endsWith("\n") ? "\n" : "\n\n";
+    await this.app.vault.modify(file, `${content}${separator}${this.formatWordBookEntry(entry)}\n`);
+    return true;
   }
 
   async syncFlashcards() {
@@ -3145,6 +3340,36 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
     } catch (error) {
       console.error("Highlight Annotation AI cursor annotation error", error);
       new Notice(error?.message || "AI \u6279\u6ce8\u751f\u6210\u5931\u8d25");
+    } finally {
+      notice.hide();
+    }
+  }
+
+  async translateSelectedWord(editor) {
+    const word = normalizeWordText(editor.getSelection());
+    if (!isLikelyEnglishWord(word)) {
+      new Notice("\u8bf7\u5148\u9009\u4e2d\u82f1\u6587\u5355\u8bcd\u6216\u77ed\u8bed");
+      return;
+    }
+
+    const notice = new Notice(`AI \u6b63\u5728\u7ffb\u8bd1\uff1a${word}`, 0);
+    try {
+      const entry = await this.generateWordTranslation(word);
+      const lines = [
+        `${entry.word}\uff1a${entry.meaning || "\u672a\u8fd4\u56de\u91ca\u4e49"}`,
+        entry.example ? `\u4f8b\u53e5\uff1a${entry.example}` : "",
+        entry.exampleTranslation ? `\u7ffb\u8bd1\uff1a${entry.exampleTranslation}` : ""
+      ].filter(Boolean);
+
+      if (this.settings.saveWordTranslations) {
+        const added = await this.appendWordTranslation(entry);
+        new Notice(added ? `\u5df2\u4fdd\u5b58\u5355\u8bcd\uff1a${entry.word}` : `\u5355\u8bcd\u672c\u5df2\u5b58\u5728\uff1a${entry.word}`);
+      }
+
+      new Notice(lines.join("\n"), 12000);
+    } catch (error) {
+      console.error("Highlight Annotation word translation error", error);
+      new Notice(error?.message || "AI \u5355\u8bcd\u7ffb\u8bd1\u5931\u8d25");
     } finally {
       notice.hide();
     }

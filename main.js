@@ -1885,8 +1885,8 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
     this.registerDomEvent(document, "click", (event) => this.handleHighlightClick(event));
     this.registerDomEvent(document, "pointerover", (event) => this.handleHighlightHoverStart(event));
     this.registerDomEvent(document, "pointerout", (event) => this.handleHighlightHoverEnd(event));
-    this.registerDomEvent(document, "scroll", () => this.hideAnnotationHoverTooltip(), true);
-    this.registerDomEvent(document, "keydown", () => this.hideAnnotationHoverTooltip());
+    this.registerDomEvent(document, "scroll", () => this.hideFloatingTooltips(), true);
+    this.registerDomEvent(document, "keydown", () => this.hideFloatingTooltips());
     this.registerInterval(window.setInterval(hideAnnotationCommentsInDocument, 200));
     registerAnnotationCommentObserver(this);
 
@@ -2117,7 +2117,7 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
       window.clearTimeout(this.annotationViewRefreshTimer);
       this.annotationViewRefreshTimer = null;
     }
-    this.hideAnnotationHoverTooltip();
+    this.hideFloatingTooltips();
     this.app.workspace.detachLeavesOfType(VIEW_TYPE_ANNOTATION_LIST);
     this.app.workspace.detachLeavesOfType(LEGACY_VIEW_TYPE_FLASHCARD_REVIEW);
   }
@@ -2390,6 +2390,63 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
     this.annotationHoverTarget = null;
     this.annotationHoverTooltipEl?.remove();
     this.annotationHoverTooltipEl = null;
+  }
+
+  hideWordTranslationTooltip() {
+    this.wordTranslationTooltipEl?.remove();
+    this.wordTranslationTooltipEl = null;
+  }
+
+  hideFloatingTooltips() {
+    this.hideAnnotationHoverTooltip();
+    this.hideWordTranslationTooltip();
+  }
+
+  getEditorSelectionRect(editor) {
+    try {
+      const selection = window.getSelection();
+      if (selection?.rangeCount) {
+        const rect = selection.getRangeAt(0).getBoundingClientRect();
+        if (rect.width || rect.height) {
+          return rect;
+        }
+      }
+    } catch (_error) {
+      // Fall back to CodeMirror coordinates.
+    }
+
+    const cursor = editor.getCursor("to");
+    const coords = editor.coordsAtPos?.(cursor, "local") ?? editor.coordsAtPos?.(cursor);
+    if (!coords) {
+      return new DOMRect(window.innerWidth / 2, window.innerHeight / 2, 0, 0);
+    }
+
+    return new DOMRect(coords.left, coords.top, Math.max(1, coords.right - coords.left), Math.max(1, coords.bottom - coords.top));
+  }
+
+  showWordTranslationTooltip(anchorRect, entry, savedState) {
+    this.hideWordTranslationTooltip();
+    const tooltipEl = document.body.createDiv({ cls: "hl-word-translation-tooltip" });
+    tooltipEl.setAttr("role", "tooltip");
+    tooltipEl.createDiv({ cls: "hl-word-translation-title", text: entry.word });
+    tooltipEl.createDiv({ cls: "hl-word-translation-meaning", text: entry.meaning || "\u672a\u8fd4\u56de\u91ca\u4e49" });
+    if (entry.example) {
+      tooltipEl.createDiv({ cls: "hl-word-translation-example", text: entry.example });
+    }
+    if (entry.exampleTranslation) {
+      tooltipEl.createDiv({ cls: "hl-word-translation-example-translation", text: entry.exampleTranslation });
+    }
+    tooltipEl.createDiv({
+      cls: "hl-word-translation-status",
+      text: savedState === "saved"
+        ? "\u5df2\u4fdd\u5b58\u5230\u5355\u8bcd\u672c"
+        : savedState === "exists"
+          ? "\u5355\u8bcd\u672c\u5df2\u5b58\u5728"
+          : "\u672a\u4fdd\u5b58"
+    });
+
+    this.wordTranslationTooltipEl = tooltipEl;
+    this.positionAnnotationHoverTooltip({ getBoundingClientRect: () => anchorRect }, tooltipEl);
   }
 
   getActiveMarkdownView() {
@@ -2932,21 +2989,20 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
   }
 
   formatWordBookEntry(entry) {
-    const lines = [
-      `==${entry.word}==`,
-      "",
-      `- \u91ca\u4e49\uff1a${entry.meaning || "\u672a\u8fd4\u56de"}`,
-    ];
+    return `==${entry.word}==`;
+  }
 
+  formatWordTranslationComment(entry) {
+    const lines = [`\u91ca\u4e49\uff1a${entry.meaning || "\u672a\u8fd4\u56de"}`];
     if (entry.example) {
-      lines.push(`- \u4f8b\u53e5\uff1a${entry.example}`);
+      lines.push(`\u4f8b\u53e5\uff1a${entry.example}`);
     }
 
     if (entry.exampleTranslation) {
-      lines.push(`- \u4f8b\u53e5\u7ffb\u8bd1\uff1a${entry.exampleTranslation}`);
+      lines.push(`\u4f8b\u53e5\u7ffb\u8bd1\uff1a${entry.exampleTranslation}`);
     }
 
-    return `${lines.join("\n")}\n`;
+    return lines.join("\n");
   }
 
   async ensureVaultFile(path, initialContent = "") {
@@ -2977,13 +3033,40 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
     const file = await this.ensureVaultFile(path, "#word\n\n");
     const content = await this.app.vault.read(file);
     const duplicatePattern = new RegExp(`(^|\\n)==\\s*${entry.word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*==`, "i");
-    if (duplicatePattern.test(content)) {
-      return false;
+    const existingMatch = duplicatePattern.exec(content);
+
+    let nextContent = content;
+    let position = existingMatch ? existingMatch.index + existingMatch[1].length : -1;
+    if (!existingMatch) {
+      const separator = content.endsWith("\n\n") || content.length === 0 ? "" : content.endsWith("\n") ? "\n" : "\n\n";
+      nextContent = `${content}${separator}${this.formatWordBookEntry(entry)}\n`;
+      await this.app.vault.modify(file, nextContent);
+      position = nextContent.lastIndexOf(`==${entry.word}==`);
     }
 
-    const separator = content.endsWith("\n\n") || content.length === 0 ? "" : content.endsWith("\n") ? "\n" : "\n\n";
-    await this.app.vault.modify(file, `${content}${separator}${this.formatWordBookEntry(entry)}\n`);
-    return true;
+    const annotation = {
+      externalId: createExternalId(file.path, position, entry.word),
+      start: position,
+      text: entry.word
+    };
+    if (existingMatch) {
+      const data = await this.loadExternalHighlightData(file.path, { create: true });
+      const existingEntry = this.getExternalEntryForAnnotation(annotation, data.highlights);
+      await this.saveExternalAnnotationComments(
+        file,
+        annotation,
+        [
+          {
+            ...(normalizeExternalComments(existingEntry?.comments)[0] ?? {}),
+            content: this.formatWordTranslationComment(entry)
+          }
+        ]
+      );
+    } else {
+      await this.appendExternalAnnotationComment(file, annotation, this.formatWordTranslationComment(entry));
+    }
+    this.clearExternalCache(file.path);
+    return !existingMatch;
   }
 
   async syncFlashcards() {
@@ -3352,21 +3435,18 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
       return;
     }
 
+    const anchorRect = this.getEditorSelectionRect(editor);
     const notice = new Notice(`AI \u6b63\u5728\u7ffb\u8bd1\uff1a${word}`, 0);
     try {
       const entry = await this.generateWordTranslation(word);
-      const lines = [
-        `${entry.word}\uff1a${entry.meaning || "\u672a\u8fd4\u56de\u91ca\u4e49"}`,
-        entry.example ? `\u4f8b\u53e5\uff1a${entry.example}` : "",
-        entry.exampleTranslation ? `\u7ffb\u8bd1\uff1a${entry.exampleTranslation}` : ""
-      ].filter(Boolean);
+      let savedState = "off";
 
       if (this.settings.saveWordTranslations) {
         const added = await this.appendWordTranslation(entry);
-        new Notice(added ? `\u5df2\u4fdd\u5b58\u5355\u8bcd\uff1a${entry.word}` : `\u5355\u8bcd\u672c\u5df2\u5b58\u5728\uff1a${entry.word}`);
+        savedState = added ? "saved" : "exists";
       }
 
-      new Notice(lines.join("\n"), 12000);
+      this.showWordTranslationTooltip(anchorRect, entry, savedState);
     } catch (error) {
       console.error("Highlight Annotation word translation error", error);
       new Notice(error?.message || "AI \u5355\u8bcd\u7ffb\u8bd1\u5931\u8d25");

@@ -55,6 +55,54 @@
   resize: vertical;
 }
 
+.hl-word-translation-tooltip {
+  position: fixed;
+  z-index: 1000;
+  width: min(360px, calc(100vw - 24px));
+  max-height: min(340px, calc(100vh - 24px));
+  overflow-y: auto;
+  padding: 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  box-sizing: border-box;
+}
+
+.hl-word-translation-title {
+  margin-bottom: 6px;
+  color: var(--text-accent);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.hl-word-translation-meaning,
+.hl-word-translation-example,
+.hl-word-translation-example-translation {
+  margin-top: 6px;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.hl-word-translation-example {
+  color: var(--text-muted);
+}
+
+.hl-word-translation-example-translation,
+.hl-word-translation-status {
+  color: var(--text-faint);
+}
+
+.hl-word-translation-status {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--background-modifier-border);
+  font-size: 12px;
+}
+
 .hl-annotation-view {
   padding: 0;
   height: 100%;

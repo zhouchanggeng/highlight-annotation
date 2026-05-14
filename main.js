@@ -3036,12 +3036,13 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
     const existingMatch = duplicatePattern.exec(content);
 
     let nextContent = content;
-    let position = existingMatch ? existingMatch.index + existingMatch[1].length : -1;
+    let position = existingMatch ? existingMatch.index + existingMatch[1].length + 2 : -1;
     if (!existingMatch) {
       const separator = content.endsWith("\n\n") || content.length === 0 ? "" : content.endsWith("\n") ? "\n" : "\n\n";
       nextContent = `${content}${separator}${this.formatWordBookEntry(entry)}\n`;
       await this.app.vault.modify(file, nextContent);
-      position = nextContent.lastIndexOf(`==${entry.word}==`);
+      const highlightPosition = nextContent.lastIndexOf(`==${entry.word}==`);
+      position = highlightPosition >= 0 ? highlightPosition + 2 : nextContent.lastIndexOf(entry.word);
     }
 
     const annotation = {

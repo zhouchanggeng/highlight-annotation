@@ -11,6 +11,7 @@ const EXTERNAL_HIGHLIGHTS_DIR = `${EXTERNAL_STORAGE_DIR}/highlights`;
 const EXTERNAL_METADATA_DIR = `${EXTERNAL_STORAGE_DIR}/metadata`;
 const EXTERNAL_FILE_MAPPING_PATH = `${EXTERNAL_METADATA_DIR}/file-mapping.json`;
 const HOVER_TOOLTIP_DELAY_MS = 1200;
+const FILE_SWITCH_EDITOR_STALE_GUARD_MS = 300;
 const DEFAULT_IGNORE_PATTERNS = [
   ".excalidraw",
   "Spaces/Archives/"
@@ -405,9 +406,14 @@ function isInsideRanges(start, end, ranges) {
 
 function isValidPlainHighlight(content, start, end, text) {
   const previousChar = content[start - 1] ?? "";
+  const firstTextChar = content[start + 2] ?? "";
   const nextChar = content[end] ?? "";
 
   if (previousChar === "=" || nextChar === "=") {
+    return false;
+  }
+
+  if (firstTextChar === "&" && /[A-Za-z0-9+/=_-]/.test(previousChar)) {
     return false;
   }
 
@@ -469,7 +475,11 @@ function parseAnnotations(content) {
   while ((match = markdownRegex.exec(content)) !== null) {
     const start = match.index;
     const end = match.index + match[0].length;
-    if (isInsideRanges(start, end, codeRanges)) {
+    if (
+      isInsideRanges(start, end, codeRanges) ||
+      !isValidPlainHighlight(content, start, end, match[1])
+    ) {
+      markdownRegex.lastIndex = start + 2;
       continue;
     }
 
@@ -516,6 +526,7 @@ function parseAnnotations(content) {
       isInsideRanges(start, end, plainHighlightIgnoredRanges) ||
       !isValidPlainHighlight(content, start, end, match[1])
     ) {
+      plainHighlightRegex.lastIndex = start + 2;
       continue;
     }
 
@@ -2164,6 +2175,9 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
     const fileChanged = previousPath !== nextPath;
 
     this.currentFile = file;
+    if (fileChanged) {
+      this.currentFileSwitchedAt = Date.now();
+    }
     if (file) {
       this.rememberCurrentHighlightSignature();
     } else {
@@ -2179,6 +2193,7 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
     }
 
     this.refreshAnnotationViews();
+    this.scheduleAnnotationViewRefresh(FILE_SWITCH_EDITOR_STALE_GUARD_MS);
   }
 
   getCurrentFile() {
@@ -2455,6 +2470,11 @@ module.exports = class HighlightAnnotationPlugin extends Plugin {
 
   async getFileContent(file) {
     const activeView = this.getActiveMarkdownView();
+    const fileSwitchAge = Date.now() - (this.currentFileSwitchedAt ?? 0);
+    if (fileSwitchAge >= 0 && fileSwitchAge < FILE_SWITCH_EDITOR_STALE_GUARD_MS) {
+      return this.app.vault.cachedRead(file);
+    }
+
     if (activeView?.file?.path === file.path && activeView.editor) {
       return activeView.editor.getValue();
     }
